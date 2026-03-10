@@ -154,6 +154,13 @@ while True:
 
     positions = get_active_positions()
 
+     # Check if the API returned an error dictionary instead of a list of positions
+    if isinstance(positions, dict) and positions.get("status") == "error":
+        print(f"Error fetching positions: {positions.get('message', 'Unknown error')}")
+        print("Sleeping 5 minutes before retrying...\n")
+        time.sleep(300)
+        continue # Skip to the next iteration of the while loop
+
     for pos in positions:
 
         active_pos = float(pos.get("active_pos", 0))
