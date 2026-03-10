@@ -14,6 +14,7 @@ import requests
 API_KEY = "XXXX"
 API_SECRET = "YYYY"
 
+
 BASE_URL = "https://api.coindcx.com"
 PUBLIC_URL = "https://public.coindcx.com/market_data/candlesticks"
 
