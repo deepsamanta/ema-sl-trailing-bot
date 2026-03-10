@@ -12,9 +12,6 @@ import requests
 
 # ================= API KEYS =================
 
-API_KEY = COINDCX_KEY
-API_SECRET = COINDCX_SECRET
-
 
 BASE_URL = "https://api.coindcx.com"
 PUBLIC_URL = "https://public.coindcx.com/market_data/candlesticks"
