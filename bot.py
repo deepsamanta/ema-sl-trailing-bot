@@ -1,8 +1,5 @@
-from config import COINDCX_KEY, COINDCX_SECRET
-
-API_KEY = COINDCX_KEY
-API_SECRET = COINDCX_SECRET
-
+import sys
+sys.stdout.reconfigure(line_buffering=True)
 
 import hmac
 import hashlib
@@ -10,8 +7,23 @@ import json
 import time
 import requests
 
+from config import COINDCX_KEY, COINDCX_SECRET
+
 # ================= API KEYS =================
 
+API_KEY = COINDCX_KEY
+API_SECRET = COINDCX_SECRET
+
+print("BOT STARTED")
+
+if not API_KEY:
+    raise Exception("COINDCX_KEY environment variable not set")
+
+if not API_SECRET:
+    raise Exception("COINDCX_SECRET environment variable not set")
+
+print("API KEY PRESENT:", True)
+print("API SECRET PRESENT:", True)
 
 BASE_URL = "https://api.coindcx.com"
 PUBLIC_URL = "https://public.coindcx.com/market_data/candlesticks"
@@ -21,6 +33,8 @@ secret_bytes = bytes(API_SECRET, encoding="utf-8")
 
 # ================= GET ACTIVE POSITIONS =================
 def get_active_positions():
+
+    print("Fetching positions...")
 
     timestamp = int(round(time.time() * 1000))
 
@@ -49,6 +63,8 @@ def get_active_positions():
 
     response = requests.post(url, data=json_body, headers=headers)
 
+    print("Positions API response received")
+
     return response.json()
 
 
@@ -59,7 +75,7 @@ def get_ema_200(pair):
 
     params = {
         "pair": pair,
-        "from": now - (360000),
+        "from": now - (720000),   # larger window for safety
         "to": now,
         "resolution": "15",
         "pcode": "f"
@@ -68,11 +84,13 @@ def get_ema_200(pair):
     r = requests.get(PUBLIC_URL, params=params)
 
     if r.status_code != 200:
+        print("Candle API error:", r.text)
         return None, None, None
 
     data = r.json()
 
     if data["s"] != "ok":
+        print("Candle API returned error:", data)
         return None, None, None
 
     candles = sorted(data["data"], key=lambda x: x["time"])
@@ -80,6 +98,7 @@ def get_ema_200(pair):
     closes = [float(c["close"]) for c in candles]
 
     if len(closes) < 200:
+        print("Not enough candles for EMA200")
         return None, None, None
 
     period = 200
@@ -150,77 +169,92 @@ while True:
 
     print("\nChecking active positions...\n")
 
-    positions = get_active_positions()
-
-     # Check if the API returned an error dictionary instead of a list of positions
-    if isinstance(positions, dict) and positions.get("status") == "error":
-        print(f"Error fetching positions: {positions.get('message', 'Unknown error')}")
-        print("Sleeping 5 minutes before retrying...\n")
+    try:
+        positions = get_active_positions()
+    except Exception as e:
+        print("Error fetching positions:", str(e))
         time.sleep(300)
-        continue # Skip to the next iteration of the while loop
+        continue
+
+    if isinstance(positions, dict) and positions.get("status") == "error":
+        print("API Error:", positions)
+        time.sleep(300)
+        continue
+
+    if not isinstance(positions, list):
+        print("Unexpected API response:", positions)
+        time.sleep(300)
+        continue
 
     for pos in positions:
 
-        active_pos = float(pos.get("active_pos", 0))
+        try:
 
-        if active_pos == 0:
-            continue
+            active_pos = float(pos.get("active_pos", 0))
 
-        pair = pos["pair"]
-        entry_price = float(pos["avg_price"])
-        position_id = pos["id"]
+            if active_pos == 0:
+                continue
 
-        side = "LONG" if active_pos > 0 else "SHORT"
+            pair = pos["pair"]
+            entry_price = float(pos["avg_price"])
+            position_id = pos["id"]
 
-        current_price, ema, new_sl = get_ema_200(pair)
+            side = "LONG" if active_pos > 0 else "SHORT"
 
-        if current_price is None:
-            continue
+            current_price, ema, new_sl = get_ema_200(pair)
 
-        print("PAIR:", pair)
-        print("SIDE:", side)
-        print("CURRENT PRICE:", current_price)
-        print("EMA200:", ema)
+            if current_price is None:
+                continue
 
-        # ===== EXISTING SL =====
-        existing_sl = pos.get("stop_loss_trigger")
+            print("PAIR:", pair)
+            print("SIDE:", side)
+            print("CURRENT PRICE:", current_price)
+            print("EMA200:", ema)
 
-        if existing_sl is not None:
-            existing_sl = float(existing_sl)
+            # ===== EXISTING SL =====
+            existing_sl = pos.get("stop_loss_trigger")
 
-        print("Existing SL:", existing_sl)
-        print("New SL:", new_sl)
+            if existing_sl is not None:
+                existing_sl = float(existing_sl)
 
-        # ===== CONDITION =====
-        if current_price < ema:
+            print("Existing SL:", existing_sl)
+            print("New SL:", new_sl)
 
-            precision = len(str(entry_price).split(".")[1]) if "." in str(entry_price) else 0
-            take_profit = round(entry_price * 0.90, precision)
+            # ===== CONDITION =====
+            if current_price < ema:
 
-            update_needed = False
+                precision = len(str(entry_price).split(".")[1]) if "." in str(entry_price) else 0
+                take_profit = round(entry_price * 0.90, precision)
 
-            if existing_sl is None or existing_sl == 0:
-                update_needed = True
+                update_needed = False
 
-            elif new_sl < existing_sl:
-                update_needed = True
+                if existing_sl is None or existing_sl == 0:
+                    update_needed = True
 
-            if update_needed:
+                elif new_sl < existing_sl:
+                    update_needed = True
 
-                print("Updating TPSL")
-                print("TP:", take_profit)
+                if update_needed:
 
-                result = update_tpsl(position_id, new_sl, take_profit)
+                    print("Updating TPSL")
+                    print("TP:", take_profit)
 
-                print("API Response:", result)
+                    result = update_tpsl(position_id, new_sl, take_profit)
+
+                    print("API Response:", result)
+
+                else:
+                    print("New SL higher than existing SL — skipping")
 
             else:
-                print("New SL is higher than existing SL — skipping update")
+                print("Price above EMA — skipping")
 
-        else:
-            print("Price above EMA — skipping")
+            print("---------------------------")
 
-        print("---------------------------")
+            time.sleep(1)  # prevent API rate limits
+
+        except Exception as e:
+            print("Error processing position:", str(e))
 
     print("Sleeping 5 minutes...\n")
 
