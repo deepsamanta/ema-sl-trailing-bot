@@ -11,8 +11,9 @@ import time
 import requests
 
 # ================= API KEYS =================
-API_KEY = "XXXX"
-API_SECRET = "YYYY"
+
+API_KEY = COINDCX_KEY
+API_SECRET = COINDCX_SECRET
 
 
 BASE_URL = "https://api.coindcx.com"
