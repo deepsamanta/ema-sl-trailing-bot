@@ -120,7 +120,7 @@ def get_ema_200(pair):
 
     ema = round(ema, precision)
 
-    stop_loss = round(ema * 1.01, precision)
+    stop_loss = round(ema * 1.032, precision)
 
     return current_price, ema, stop_loss
 
