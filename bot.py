@@ -68,63 +68,6 @@ def get_active_positions():
     return response.json()
 
 
-# ================= EMA CALCULATION =================
-def get_ema_200(pair):
-
-    now = int(time.time())
-
-    params = {
-        "pair": pair,
-        "from": now - (720000),   # larger window for safety
-        "to": now,
-        "resolution": "15",
-        "pcode": "f"
-    }
-
-    r = requests.get(PUBLIC_URL, params=params)
-
-    if r.status_code != 200:
-        print("Candle API error:", r.text)
-        return None, None, None
-
-    data = r.json()
-
-    if data["s"] != "ok":
-        print("Candle API returned error:", data)
-        return None, None, None
-
-    candles = sorted(data["data"], key=lambda x: x["time"])
-
-    closes = [float(c["close"]) for c in candles]
-
-    if len(closes) < 200:
-        print("Not enough candles for EMA200")
-        return None, None, None
-
-    period = 200
-    multiplier = 2 / (period + 1)
-
-    ema = sum(closes[:period]) / period
-
-    for price in closes[period:]:
-        ema = (price - ema) * multiplier + ema
-
-    current_price = closes[-1]
-
-    price_str = str(current_price)
-
-    if "." in price_str:
-        precision = len(price_str.split(".")[1])
-    else:
-        precision = 0
-
-    ema = round(ema, precision)
-
-    stop_loss = round(ema * 1.032, precision)
-
-    return current_price, ema, stop_loss
-
-
 # ================= UPDATE TPSL =================
 def update_tpsl(position_id, sl_price, tp_price):
 
@@ -164,6 +107,33 @@ def update_tpsl(position_id, sl_price, tp_price):
     return r.json()
 
 
+# ================= GET CURRENT PRICE =================
+def get_current_price(pair):
+
+    params = {
+        "pair": pair,
+        "resolution": "1",
+        "pcode": "f"
+    }
+
+    r = requests.get(PUBLIC_URL, params=params)
+
+    if r.status_code != 200:
+        return None
+
+    data = r.json()
+
+    if data["s"] != "ok":
+        return None
+
+    candles = data["data"]
+
+    if not candles:
+        return None
+
+    return float(candles[-1]["close"])
+
+
 # ================= MAIN LOOP =================
 while True:
 
@@ -201,57 +171,54 @@ while True:
 
             side = "LONG" if active_pos > 0 else "SHORT"
 
-            current_price, ema, new_sl = get_ema_200(pair)
+            current_price = get_current_price(pair)
 
             if current_price is None:
                 continue
 
             print("PAIR:", pair)
             print("SIDE:", side)
+            print("ENTRY PRICE:", entry_price)
             print("CURRENT PRICE:", current_price)
-            print("EMA200:", ema)
 
-            # ===== EXISTING SL =====
             existing_sl = pos.get("stop_loss_trigger")
 
             if existing_sl is not None:
                 existing_sl = float(existing_sl)
 
             print("Existing SL:", existing_sl)
-            print("New SL:", new_sl)
 
-            # ===== CONDITION =====
-            if current_price < ema:
+            # ===== BREAK EVEN CONDITION =====
+            if current_price < entry_price:
+
+                new_sl = entry_price
 
                 precision = len(str(entry_price).split(".")[1]) if "." in str(entry_price) else 0
                 take_profit = round(entry_price * 0.90, precision)
 
                 update_needed = False
 
-                if existing_sl is None or existing_sl == 0:
-                    update_needed = True
-
-                elif new_sl < existing_sl:
+                if existing_sl is None or existing_sl > entry_price:
                     update_needed = True
 
                 if update_needed:
 
-                    print("Updating TPSL")
-                    print("TP:", take_profit)
+                    print("Moving SL to Break Even")
+                    print("New SL:", new_sl)
 
                     result = update_tpsl(position_id, new_sl, take_profit)
 
                     print("API Response:", result)
 
                 else:
-                    print("New SL higher than existing SL — skipping")
+                    print("SL already moved to break even")
 
             else:
-                print("Price above EMA — skipping")
+                print("Price not below entry — skipping")
 
             print("---------------------------")
 
-            time.sleep(1)  # prevent API rate limits
+            time.sleep(1)
 
         except Exception as e:
             print("Error processing position:", str(e))
