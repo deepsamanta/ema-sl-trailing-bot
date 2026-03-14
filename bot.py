@@ -237,6 +237,6 @@ while True:
 
             print("Error processing position:", e)
 
-    print("Sleeping 5 minutes...\n")
+    print("Sleeping 3 minutes...\n")
 
-    time.sleep(300)
+    time.sleep(180)
