@@ -9,7 +9,7 @@ import requests
 
 from config import COINDCX_KEY, COINDCX_SECRET
 
-# ================= API KEYS =================
+
 
 API_KEY = COINDCX_KEY
 API_SECRET = COINDCX_SECRET
@@ -17,13 +17,10 @@ API_SECRET = COINDCX_SECRET
 print("BOT STARTED")
 
 if not API_KEY:
-    raise Exception("COINDCX_KEY environment variable not set")
+    raise Exception("COINDCX_KEY not set")
 
 if not API_SECRET:
-    raise Exception("COINDCX_SECRET environment variable not set")
-
-print("API KEY PRESENT:", True)
-print("API SECRET PRESENT:", True)
+    raise Exception("COINDCX_SECRET not set")
 
 BASE_URL = "https://api.coindcx.com"
 PUBLIC_URL = "https://public.coindcx.com/market_data/candlesticks"
@@ -33,8 +30,6 @@ secret_bytes = bytes(API_SECRET, encoding="utf-8")
 
 # ================= GET ACTIVE POSITIONS =================
 def get_active_positions():
-
-    print("Fetching positions...")
 
     timestamp = int(round(time.time() * 1000))
 
@@ -61,11 +56,52 @@ def get_active_positions():
 
     url = BASE_URL + "/exchange/v1/derivatives/futures/positions"
 
-    response = requests.post(url, data=json_body, headers=headers)
+    r = requests.post(url, data=json_body, headers=headers)
 
-    print("Positions API response received")
+    return r.json()
 
-    return response.json()
+
+# ================= EMA 200 =================
+def get_ema_200(pair):
+
+    now = int(time.time())
+
+    params = {
+        "pair": pair,
+        "from": now - 720000,
+        "to": now,
+        "resolution": "15",
+        "pcode": "f"
+    }
+
+    r = requests.get(PUBLIC_URL, params=params)
+
+    if r.status_code != 200:
+        return None, None
+
+    data = r.json()
+
+    if data["s"] != "ok":
+        return None, None
+
+    candles = sorted(data["data"], key=lambda x: x["time"])
+
+    closes = [float(c["close"]) for c in candles]
+
+    if len(closes) < 200:
+        return None, None
+
+    period = 200
+    multiplier = 2 / (period + 1)
+
+    ema = sum(closes[:period]) / period
+
+    for price in closes[period:]:
+        ema = (price - ema) * multiplier + ema
+
+    current_price = closes[-1]
+
+    return current_price, ema
 
 
 # ================= UPDATE TPSL =================
@@ -107,52 +143,15 @@ def update_tpsl(position_id, sl_price, tp_price):
     return r.json()
 
 
-# ================= GET CURRENT PRICE =================
-def get_current_price(pair):
-
-    params = {
-        "pair": pair,
-        "resolution": "1",
-        "pcode": "f"
-    }
-
-    r = requests.get(PUBLIC_URL, params=params)
-
-    if r.status_code != 200:
-        return None
-
-    data = r.json()
-
-    if data["s"] != "ok":
-        return None
-
-    candles = data["data"]
-
-    if not candles:
-        return None
-
-    return float(candles[-1]["close"])
-
-
 # ================= MAIN LOOP =================
 while True:
 
     print("\nChecking active positions...\n")
 
-    try:
-        positions = get_active_positions()
-    except Exception as e:
-        print("Error fetching positions:", str(e))
-        time.sleep(300)
-        continue
-
-    if isinstance(positions, dict) and positions.get("status") == "error":
-        print("API Error:", positions)
-        time.sleep(300)
-        continue
+    positions = get_active_positions()
 
     if not isinstance(positions, list):
-        print("Unexpected API response:", positions)
+        print("API error:", positions)
         time.sleep(300)
         continue
 
@@ -169,59 +168,74 @@ while True:
             entry_price = float(pos["avg_price"])
             position_id = pos["id"]
 
-            side = "LONG" if active_pos > 0 else "SHORT"
+            existing_sl = pos.get("stop_loss_trigger")
 
-            current_price = get_current_price(pair)
+            if existing_sl:
+                existing_sl = float(existing_sl)
+
+            current_price, ema = get_ema_200(pair)
 
             if current_price is None:
                 continue
 
-            print("PAIR:", pair)
-            print("SIDE:", side)
-            print("ENTRY PRICE:", entry_price)
-            print("CURRENT PRICE:", current_price)
+            profit_percent = ((entry_price - current_price) / entry_price) * 100
 
-            existing_sl = pos.get("stop_loss_trigger")
+            precision = len(str(entry_price).split(".")[1]) if "." in str(entry_price) else 0
 
-            if existing_sl is not None:
-                existing_sl = float(existing_sl)
+            take_profit = round(entry_price * 0.90, precision)
 
+            print(pair)
+            print("Entry:", entry_price)
+            print("Price:", current_price)
+            print("Profit:", round(profit_percent, 3), "%")
             print("Existing SL:", existing_sl)
 
-            # ===== BREAK EVEN CONDITION =====
-            if current_price < entry_price:
+            # ===== STAGE 1 BREAK EVEN =====
+            if profit_percent >= 0.3:
 
                 new_sl = entry_price
 
-                precision = len(str(entry_price).split(".")[1]) if "." in str(entry_price) else 0
-                take_profit = round(entry_price * 0.90, precision)
+                if existing_sl is None or existing_sl > new_sl:
 
-                update_needed = False
+                    print("Moving SL → Break Even")
 
-                if existing_sl is None or existing_sl > entry_price:
-                    update_needed = True
+                    update_tpsl(position_id, new_sl, take_profit)
 
-                if update_needed:
+                    time.sleep(1)
+                    continue
 
-                    print("Moving SL to Break Even")
-                    print("New SL:", new_sl)
+            # ===== STAGE 2 EMA TRAIL =====
+            if profit_percent >= 0.8 and ema:
 
-                    result = update_tpsl(position_id, new_sl, take_profit)
+                candidate_sl = round(ema * 1.032, precision)
 
-                    print("API Response:", result)
+                if existing_sl and candidate_sl < existing_sl and candidate_sl < entry_price:
 
-                else:
-                    print("SL already moved to break even")
+                    print("Trailing SL → EMA")
 
-            else:
-                print("Price not below entry — skipping")
+                    update_tpsl(position_id, candidate_sl, take_profit)
 
-            print("---------------------------")
+                    time.sleep(1)
+                    continue
+
+            # ===== STAGE 3 PROFIT LOCK =====
+            if profit_percent >= 3:
+
+                candidate_sl = round(entry_price * 0.99, precision)
+
+                if existing_sl and candidate_sl < existing_sl:
+
+                    print("Locking Profit")
+
+                    update_tpsl(position_id, candidate_sl, take_profit)
+
+            print("---------------------")
 
             time.sleep(1)
 
         except Exception as e:
-            print("Error processing position:", str(e))
+
+            print("Error processing position:", e)
 
     print("Sleeping 5 minutes...\n")
 
