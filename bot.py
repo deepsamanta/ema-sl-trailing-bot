@@ -9,8 +9,6 @@ import requests
 
 from config import COINDCX_KEY, COINDCX_SECRET
 
-
-
 API_KEY = COINDCX_KEY
 API_SECRET = COINDCX_SECRET
 
@@ -28,7 +26,7 @@ PUBLIC_URL = "https://public.coindcx.com/market_data/candlesticks"
 secret_bytes = bytes(API_SECRET, encoding="utf-8")
 
 
-# ================= GET ACTIVE POSITIONS =================
+# ================= GET POSITIONS =================
 def get_active_positions():
 
     timestamp = int(round(time.time() * 1000))
@@ -61,7 +59,7 @@ def get_active_positions():
     return r.json()
 
 
-# ================= EMA 200 =================
+# ================= EMA =================
 def get_ema_200(pair):
 
     now = int(time.time())
@@ -169,9 +167,13 @@ while True:
             position_id = pos["id"]
 
             existing_sl = pos.get("stop_loss_trigger")
+            existing_tp = pos.get("take_profit_trigger")
 
             if existing_sl:
                 existing_sl = float(existing_sl)
+
+            if existing_tp:
+                existing_tp = float(existing_tp)
 
             current_price, ema = get_ema_200(pair)
 
@@ -182,16 +184,15 @@ while True:
 
             precision = len(str(entry_price).split(".")[1]) if "." in str(entry_price) else 0
 
-            take_profit = round(entry_price * 0.90, precision)
-
             print(pair)
             print("Entry:", entry_price)
             print("Price:", current_price)
             print("Profit:", round(profit_percent, 3), "%")
             print("Existing SL:", existing_sl)
+            print("Existing TP:", existing_tp)
 
             # ===== STAGE 1 BREAK EVEN =====
-            if profit_percent >= 0.3:
+            if profit_percent >= 3:
 
                 new_sl = entry_price
 
@@ -199,13 +200,27 @@ while True:
 
                     print("Moving SL → Break Even")
 
-                    update_tpsl(position_id, new_sl, take_profit)
+                    update_tpsl(position_id, new_sl, existing_tp)
 
                     time.sleep(1)
                     continue
 
-            # ===== STAGE 2 EMA TRAIL =====
-            if profit_percent >= 0.8 and ema:
+            # ===== STAGE 2 LOCK PROFIT =====
+            if profit_percent >= 5:
+
+                candidate_sl = round(entry_price * 0.97, precision)
+
+                if existing_sl and candidate_sl < existing_sl:
+
+                    print("Locking 3% Profit")
+
+                    update_tpsl(position_id, candidate_sl, existing_tp)
+
+                    time.sleep(1)
+                    continue
+
+            # ===== STAGE 3 EMA TRAILING =====
+            if profit_percent >= 6 and ema:
 
                 candidate_sl = round(ema * 1.032, precision)
 
@@ -213,21 +228,7 @@ while True:
 
                     print("Trailing SL → EMA")
 
-                    update_tpsl(position_id, candidate_sl, take_profit)
-
-                    time.sleep(1)
-                    continue
-
-            # ===== STAGE 3 PROFIT LOCK =====
-            if profit_percent >= 3:
-
-                candidate_sl = round(entry_price * 0.99, precision)
-
-                if existing_sl and candidate_sl < existing_sl:
-
-                    print("Locking Profit")
-
-                    update_tpsl(position_id, candidate_sl, take_profit)
+                    update_tpsl(position_id, candidate_sl, existing_tp)
 
             print("---------------------")
 
@@ -237,6 +238,6 @@ while True:
 
             print("Error processing position:", e)
 
-    print("Sleeping 3 minutes...\n")
+    print("Sleeping 5 minutes...\n")
 
-    time.sleep(180)
+    time.sleep(300)
