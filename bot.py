@@ -191,11 +191,11 @@ while True:
             print("Existing SL:", existing_sl)
             print("Existing TP:", existing_tp)
 
-            # ===== TP CAP: Clamp TP to max 6% profit if it exceeds that =====
-            max_tp_price = round(entry_price * 0.94, precision)
+            # ===== TP CAP: Clamp TP to max 3.1% profit if it exceeds that =====
+            max_tp_price = round(entry_price * 0.969, precision)
 
             if existing_tp is not None and existing_tp < max_tp_price:
-                print(f"TP exceeds 6% profit ({existing_tp} < {max_tp_price}), clamping TP to 6%")
+                print(f"TP exceeds 3.1% profit ({existing_tp} < {max_tp_price}), clamping TP to 3.1%")
                 update_tpsl(position_id, existing_sl, max_tp_price)
                 existing_tp = max_tp_price
                 time.sleep(1)
