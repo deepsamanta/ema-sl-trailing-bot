@@ -12,7 +12,7 @@ from config import COINDCX_KEY, COINDCX_SECRET
 API_KEY = COINDCX_KEY
 API_SECRET = COINDCX_SECRET
 
-print("BOT STARTED")
+print("TRAILING SL BOT STARTED")
 
 if not API_KEY:
     raise Exception("COINDCX_KEY not set")
@@ -21,7 +21,7 @@ if not API_SECRET:
     raise Exception("COINDCX_SECRET not set")
 
 BASE_URL = "https://api.coindcx.com"
-PUBLIC_URL = "https://public.coindcx.com/market_data/candlesticks"
+PRICES_URL = "https://public.coindcx.com/market_data/v3/current_prices/futures/rt"
 
 secret_bytes = bytes(API_SECRET, encoding="utf-8")
 
@@ -59,66 +59,51 @@ def get_active_positions():
     return r.json()
 
 
-# ================= EMA =================
-def get_ema_200(pair):
+# ================= GET CURRENT PRICE =================
+def get_current_price(pair):
 
-    now = int(time.time())
+    try:
 
-    params = {
-        "pair": pair,
-        "from": now - 720000,
-        "to": now,
-        "resolution": "15",
-        "pcode": "f"
-    }
+        r = requests.get(PRICES_URL, timeout=10)
 
-    r = requests.get(PUBLIC_URL, params=params)
+        if r.status_code != 200:
+            return None
 
-    if r.status_code != 200:
-        return None, None
+        data = r.json()
 
-    data = r.json()
+        pair_data = data.get("prices", {}).get(pair)
 
-    if data["s"] != "ok":
-        return None, None
+        if not pair_data:
+            return None
 
-    candles = sorted(data["data"], key=lambda x: x["time"])
+        return float(pair_data.get("ls"))
 
-    closes = [float(c["close"]) for c in candles]
+    except Exception as e:
 
-    if len(closes) < 200:
-        return None, None
-
-    period = 200
-    multiplier = 2 / (period + 1)
-
-    ema = sum(closes[:period]) / period
-
-    for price in closes[period:]:
-        ema = (price - ema) * multiplier + ema
-
-    current_price = closes[-1]
-
-    return current_price, ema
+        print("Price fetch error:", e)
+        return None
 
 
-# ================= UPDATE TPSL =================
-def update_tpsl(position_id, sl_price, tp_price):
+# ================= UPDATE SL (keeps TP untouched) =================
+def update_sl(position_id, sl_price, existing_tp):
 
     timestamp = int(round(time.time() * 1000))
 
     body = {
         "timestamp": timestamp,
         "id": position_id,
-        "take_profit": {
-            "stop_price": str(tp_price),
-            "order_type": "take_profit_market"
-        },
         "stop_loss": {
             "stop_price": str(sl_price),
             "order_type": "stop_market"
         }
     }
+
+    # Preserve existing TP — never create a new one, never remove one.
+    if existing_tp is not None:
+        body["take_profit"] = {
+            "stop_price": str(existing_tp),
+            "order_type": "take_profit_market"
+        }
 
     json_body = json.dumps(body, separators=(',', ':'))
 
@@ -139,6 +124,40 @@ def update_tpsl(position_id, sl_price, tp_price):
     r = requests.post(url, data=json_body, headers=headers)
 
     return r.json()
+
+
+# ================= TRAILING SL CALCULATION =================
+def calculate_trailing_sl(side, entry_price, profit_percent, precision):
+    """
+    Returns target SL price based on floored profit level.
+    Returns None if profit hasn't reached the first trigger (+1%).
+
+    LONG (mirror for short):
+      profit >= 1%   ->  SL = entry - 0.3%
+      profit >= 2%   ->  SL = entry         (break-even)
+      profit >= 3%   ->  SL = entry + 0.3%
+      profit >= 4%   ->  SL = entry + 0.6%
+      profit >= N%   ->  SL = entry + 0.3%*(N-2)
+    """
+
+    if profit_percent < 1:
+        return None
+
+    # Floor profit to integer level. 1.9% -> level 1, 2.0% -> level 2.
+    level = int(profit_percent)
+
+    # Percent offset from entry along the *favorable* direction.
+    # level 1 -> -0.3 (losing side), level 2 -> 0, level 3 -> +0.3, level 4 -> +0.6 ...
+    offset_percent = 0.3 * (level - 2)
+
+    if side == "long":
+        # Favorable direction is UP -> add offset
+        new_sl = entry_price * (1 + offset_percent / 100)
+    else:  # short
+        # Favorable direction is DOWN -> subtract offset
+        new_sl = entry_price * (1 - offset_percent / 100)
+
+    return round(new_sl, precision)
 
 
 # ================= MAIN LOOP =================
@@ -166,78 +185,65 @@ while True:
             entry_price = float(pos["avg_price"])
             position_id = pos["id"]
 
+            # Positive active_pos = LONG, negative = SHORT
+            side = "long" if active_pos > 0 else "short"
+
             existing_sl = pos.get("stop_loss_trigger")
             existing_tp = pos.get("take_profit_trigger")
 
-            if existing_sl:
+            if existing_sl is not None:
                 existing_sl = float(existing_sl)
 
-            if existing_tp:
+            if existing_tp is not None:
                 existing_tp = float(existing_tp)
 
-            current_price, ema = get_ema_200(pair)
+            current_price = get_current_price(pair)
 
             if current_price is None:
+                print(f"{pair}: could not fetch price, skipping")
                 continue
 
-            profit_percent = ((entry_price - current_price) / entry_price) * 100
+            # Profit % is direction-aware
+            if side == "long":
+                profit_percent = ((current_price - entry_price) / entry_price) * 100
+            else:
+                profit_percent = ((entry_price - current_price) / entry_price) * 100
 
             precision = len(str(entry_price).split(".")[1]) if "." in str(entry_price) else 0
 
-            print(pair)
+            print(pair, "  [", side.upper(), "]")
             print("Entry:", entry_price)
             print("Price:", current_price)
             print("Profit:", round(profit_percent, 3), "%")
             print("Existing SL:", existing_sl)
             print("Existing TP:", existing_tp)
 
-            # ===== TP CAP: Clamp TP to max 3.1% profit if it exceeds that =====
-            max_tp_price = round(entry_price * 0.969, precision)
+            candidate_sl = calculate_trailing_sl(side, entry_price, profit_percent, precision)
 
-            if existing_tp is not None and existing_tp < max_tp_price:
-                print(f"TP exceeds 3.1% profit ({existing_tp} < {max_tp_price}), clamping TP to 3.1%")
-                update_tpsl(position_id, existing_sl, max_tp_price)
-                existing_tp = max_tp_price
-                time.sleep(1)
+            if candidate_sl is None:
+                print("Profit below 1% trigger, no SL update")
+                print("---------------------")
+                continue
 
-            # ===== STAGE 1 BREAK EVEN =====
-            if profit_percent >= 3:
+            print("Candidate SL:", candidate_sl)
 
-                new_sl = entry_price
+            # Only tighten SL, never loosen it.
+            # LONG: higher SL is safer.  SHORT: lower SL is safer.
+            should_update = False
 
-                if existing_sl is None or existing_sl > new_sl:
+            if existing_sl is None:
+                should_update = True
+            elif side == "long" and candidate_sl > existing_sl:
+                should_update = True
+            elif side == "short" and candidate_sl < existing_sl:
+                should_update = True
 
-                    print("Moving SL → Break Even")
-
-                    update_tpsl(position_id, new_sl, existing_tp)
-
-                    time.sleep(1)
-                    continue
-
-            # ===== STAGE 2 LOCK PROFIT =====
-            if profit_percent >= 5:
-
-                candidate_sl = round(entry_price * 0.97, precision)
-
-                if existing_sl and candidate_sl < existing_sl:
-
-                    print("Locking 3% Profit")
-
-                    update_tpsl(position_id, candidate_sl, existing_tp)
-
-                    time.sleep(1)
-                    continue
-
-            # ===== STAGE 3 EMA TRAILING =====
-            if profit_percent >= 6 and ema:
-
-                candidate_sl = round(ema * 1.032, precision)
-
-                if existing_sl and candidate_sl < existing_sl and candidate_sl < entry_price:
-
-                    print("Trailing SL → EMA")
-
-                    update_tpsl(position_id, candidate_sl, existing_tp)
+            if should_update:
+                print("Moving SL ->", candidate_sl)
+                result = update_sl(position_id, candidate_sl, existing_tp)
+                print("Update result:", result)
+            else:
+                print("Existing SL already equal/better, skipping")
 
             print("---------------------")
 
