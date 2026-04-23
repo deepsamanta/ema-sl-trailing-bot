@@ -22,8 +22,13 @@ if not API_SECRET:
 
 BASE_URL = "https://api.coindcx.com"
 PRICES_URL = "https://public.coindcx.com/market_data/v3/current_prices/futures/rt"
+INSTRUMENT_URL = BASE_URL + "/exchange/v1/derivatives/futures/data/instrument"
 
 secret_bytes = bytes(API_SECRET, encoding="utf-8")
+
+# Cache of pair -> price_increment (tick size). Instruments rarely change,
+# so we fetch once per pair and reuse.
+TICK_CACHE = {}
 
 
 # ================= GET POSITIONS =================
@@ -59,11 +64,65 @@ def get_active_positions():
     return r.json()
 
 
+# ================= GET PRICE INCREMENT (tick size) =================
+def get_price_increment(pair):
+    """
+    Returns the instrument's price_increment (e.g. 0.01, 0.000001).
+    Cached per pair.
+    """
+
+    if pair in TICK_CACHE:
+        return TICK_CACHE[pair]
+
+    try:
+        params = {"pair": pair, "margin_currency_short_name": "USDT"}
+        r = requests.get(INSTRUMENT_URL, params=params, timeout=10)
+
+        if r.status_code != 200:
+            print(f"Instrument fetch error {pair}: HTTP {r.status_code}")
+            return None
+
+        data = r.json()
+        tick = float(data["instrument"]["price_increment"])
+
+        TICK_CACHE[pair] = tick
+        return tick
+
+    except Exception as e:
+        print(f"Instrument fetch error {pair}: {e}")
+        return None
+
+
+# ================= TICK-ALIGNMENT HELPERS =================
+def tick_decimals(tick):
+    """Number of decimal places implied by the tick size."""
+    s = f"{tick:.12f}".rstrip("0").rstrip(".")
+    if "." in s:
+        return len(s.split(".")[1])
+    return 0
+
+
+def align_to_tick(price, tick):
+    """
+    Snap price to an exact multiple of tick and return it as a fixed-decimal
+    STRING with exactly tick_decimals(tick) digits after the point.
+    Returning a string (not float) prevents re-introducing float artifacts
+    when the caller does str(price).
+    """
+    if tick is None or tick <= 0:
+        return None
+
+    steps = round(price / tick)
+    decimals = tick_decimals(tick)
+    snapped = steps * tick
+
+    return f"{snapped:.{decimals}f}"
+
+
 # ================= GET CURRENT PRICE =================
 def get_current_price(pair):
 
     try:
-
         r = requests.get(PRICES_URL, timeout=10)
 
         if r.status_code != 200:
@@ -79,13 +138,15 @@ def get_current_price(pair):
         return float(pair_data.get("ls"))
 
     except Exception as e:
-
         print("Price fetch error:", e)
         return None
 
 
 # ================= UPDATE SL (keeps TP untouched) =================
-def update_sl(position_id, sl_price, existing_tp):
+def update_sl(position_id, sl_price_str, existing_tp_str):
+    """
+    sl_price_str and existing_tp_str must already be tick-aligned strings.
+    """
 
     timestamp = int(round(time.time() * 1000))
 
@@ -93,15 +154,15 @@ def update_sl(position_id, sl_price, existing_tp):
         "timestamp": timestamp,
         "id": position_id,
         "stop_loss": {
-            "stop_price": str(sl_price),
+            "stop_price": sl_price_str,
             "order_type": "stop_market"
         }
     }
 
     # Preserve existing TP — never create a new one, never remove one.
-    if existing_tp is not None:
+    if existing_tp_str is not None:
         body["take_profit"] = {
-            "stop_price": str(existing_tp),
+            "stop_price": existing_tp_str,
             "order_type": "take_profit_market"
         }
 
@@ -127,37 +188,33 @@ def update_sl(position_id, sl_price, existing_tp):
 
 
 # ================= TRAILING SL CALCULATION =================
-def calculate_trailing_sl(side, entry_price, profit_percent, precision):
+def calculate_trailing_sl(side, entry_price, profit_percent):
     """
-    Returns target SL price based on floored profit level.
-    Returns None if profit hasn't reached the first trigger (+1%).
+    Returns target SL price (float) based on floored profit level, or None
+    if profit hasn't reached the first trigger (+1%).
 
     LONG (mirror for short):
-      profit >= 1%   ->  SL = entry - 0.3%
-      profit >= 2%   ->  SL = entry         (break-even)
-      profit >= 3%   ->  SL = entry + 0.3%
-      profit >= 4%   ->  SL = entry + 0.6%
-      profit >= N%   ->  SL = entry + 0.3%*(N-2)
+      profit >= 1%  ->  SL = entry - 0.3%
+      profit >= 2%  ->  SL = entry          (break-even)
+      profit >= 3%  ->  SL = entry + 0.3%
+      profit >= 4%  ->  SL = entry + 0.6%
+      profit >= N%  ->  SL = entry + 0.3%*(N-2)
     """
 
     if profit_percent < 1:
         return None
 
-    # Floor profit to integer level. 1.9% -> level 1, 2.0% -> level 2.
     level = int(profit_percent)
-
-    # Percent offset from entry along the *favorable* direction.
-    # level 1 -> -0.3 (losing side), level 2 -> 0, level 3 -> +0.3, level 4 -> +0.6 ...
     offset_percent = 0.3 * (level - 2)
 
     if side == "long":
         # Favorable direction is UP -> add offset
         new_sl = entry_price * (1 + offset_percent / 100)
-    else:  # short
+    else:
         # Favorable direction is DOWN -> subtract offset
         new_sl = entry_price * (1 - offset_percent / 100)
 
-    return round(new_sl, precision)
+    return new_sl
 
 
 # ================= MAIN LOOP =================
@@ -209,23 +266,33 @@ while True:
             else:
                 profit_percent = ((entry_price - current_price) / entry_price) * 100
 
-            precision = len(str(entry_price).split(".")[1]) if "." in str(entry_price) else 0
+            # Get the instrument's real tick size — NEVER infer it from entry_price.
+            tick = get_price_increment(pair)
+
+            if tick is None:
+                print(f"{pair}: could not fetch tick size, skipping")
+                continue
 
             print(pair, "  [", side.upper(), "]")
             print("Entry:", entry_price)
             print("Price:", current_price)
+            print("Tick :", tick)
             print("Profit:", round(profit_percent, 3), "%")
             print("Existing SL:", existing_sl)
             print("Existing TP:", existing_tp)
 
-            candidate_sl = calculate_trailing_sl(side, entry_price, profit_percent, precision)
+            raw_sl = calculate_trailing_sl(side, entry_price, profit_percent)
 
-            if candidate_sl is None:
+            if raw_sl is None:
                 print("Profit below 1% trigger, no SL update")
                 print("---------------------")
                 continue
 
-            print("Candidate SL:", candidate_sl)
+            # Snap SL to a valid tick multiple and keep it as a string for sending.
+            sl_price_str = align_to_tick(raw_sl, tick)
+            candidate_sl = float(sl_price_str)
+
+            print("Candidate SL:", sl_price_str)
 
             # Only tighten SL, never loosen it.
             # LONG: higher SL is safer.  SHORT: lower SL is safer.
@@ -239,8 +306,14 @@ while True:
                 should_update = True
 
             if should_update:
-                print("Moving SL ->", candidate_sl)
-                result = update_sl(position_id, candidate_sl, existing_tp)
+                # Re-snap existing_tp to the same tick grid to avoid float-drift
+                # corrupting it when we echo it back to the API.
+                existing_tp_str = None
+                if existing_tp is not None:
+                    existing_tp_str = align_to_tick(existing_tp, tick)
+
+                print("Moving SL ->", sl_price_str)
+                result = update_sl(position_id, sl_price_str, existing_tp_str)
                 print("Update result:", result)
             else:
                 print("Existing SL already equal/better, skipping")
@@ -250,7 +323,6 @@ while True:
             time.sleep(1)
 
         except Exception as e:
-
             print("Error processing position:", e)
 
     print("Sleeping 5 minutes...\n")
