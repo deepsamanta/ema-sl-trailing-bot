@@ -248,11 +248,17 @@ while True:
             existing_sl = pos.get("stop_loss_trigger")
             existing_tp = pos.get("take_profit_trigger")
 
+            # CoinDCX returns 0 / 0.0 (not null) when no TP/SL is set.
+            # Normalise both to None so downstream logic treats them as absent.
             if existing_sl is not None:
                 existing_sl = float(existing_sl)
+                if existing_sl == 0:
+                    existing_sl = None
 
             if existing_tp is not None:
                 existing_tp = float(existing_tp)
+                if existing_tp == 0:
+                    existing_tp = None
 
             current_price = get_current_price(pair)
 
