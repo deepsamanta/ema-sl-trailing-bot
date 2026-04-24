@@ -281,6 +281,30 @@ while True:
             print("Existing SL:", existing_sl)
             print("Existing TP:", existing_tp)
 
+            # ===== INITIAL TP/SL =====
+            # If the position has NEITHER a TP nor an SL, seed them:
+            #   TP = +5% profit,  SL = -3% loss (direction-aware).
+            # Then skip trailing this cycle — next run will see the TP we
+            # just set, leave it untouched, and trail the SL as profit grows.
+            if existing_tp is None and existing_sl is None:
+
+                if side == "long":
+                    raw_initial_tp = entry_price * 1.05  # +5% profit -> price up
+                    raw_initial_sl = entry_price * 0.97  # -3% loss  -> price down
+                else:  # short
+                    raw_initial_tp = entry_price * 0.95  # +5% profit -> price down
+                    raw_initial_sl = entry_price * 1.03  # -3% loss  -> price up
+
+                initial_tp_str = align_to_tick(raw_initial_tp, tick)
+                initial_sl_str = align_to_tick(raw_initial_sl, tick)
+
+                print("No TP/SL set — initializing  TP:", initial_tp_str, " SL:", initial_sl_str)
+                result = update_sl(position_id, initial_sl_str, initial_tp_str)
+                print("Init result:", result)
+                print("---------------------")
+                time.sleep(1)
+                continue
+
             raw_sl = calculate_trailing_sl(side, entry_price, profit_percent)
 
             if raw_sl is None:
