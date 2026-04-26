@@ -205,7 +205,11 @@ def calculate_trailing_sl(side, entry_price, profit_percent):
         return None
 
     level = int(profit_percent)
-    offset_percent = 0.3 * (level - 2)
+
+    if level == 2:
+        offset_percent = 0.2
+    else:
+        offset_percent = 0.3 * (level - 2)
 
     if side == "long":
         # Favorable direction is UP -> add offset
