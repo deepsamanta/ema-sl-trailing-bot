@@ -359,6 +359,6 @@ while True:
         except Exception as e:
             print("Error processing position:", e)
 
-    print("Sleeping 5 minutes...\n")
+    print("Sleeping 2 minutes 30 seconds...\n")
 
-    time.sleep(300)
+    time.sleep(150)
