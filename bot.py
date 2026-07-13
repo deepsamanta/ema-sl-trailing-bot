@@ -26,71 +26,49 @@ INSTRUMENT_URL = BASE_URL + "/exchange/v1/derivatives/futures/data/instrument"
 
 secret_bytes = bytes(API_SECRET, encoding="utf-8")
 
-# Maximum allowed loss distance for any SL (percent).
 MAX_SL_LOSS_PERCENT = 5.0
 
 TICK_CACHE = {}
 
 
-# ================= GET POSITIONS =================
 def get_active_positions():
-
     timestamp = int(round(time.time() * 1000))
-
     body = {
         "timestamp": timestamp,
         "page": "1",
         "size": "50",
         "margin_currency_short_name": ["USDT"]
     }
-
     json_body = json.dumps(body, separators=(',', ':'))
-
-    signature = hmac.new(
-        secret_bytes,
-        json_body.encode(),
-        hashlib.sha256
-    ).hexdigest()
-
+    signature = hmac.new(secret_bytes, json_body.encode(), hashlib.sha256).hexdigest()
     headers = {
         "Content-Type": "application/json",
         "X-AUTH-APIKEY": API_KEY,
         "X-AUTH-SIGNATURE": signature
     }
-
     url = BASE_URL + "/exchange/v1/derivatives/futures/positions"
-
     r = requests.post(url, data=json_body, headers=headers)
-
     return r.json()
 
 
-# ================= GET PRICE INCREMENT (tick size) =================
 def get_price_increment(pair):
-
     if pair in TICK_CACHE:
         return TICK_CACHE[pair]
-
     try:
         params = {"pair": pair, "margin_currency_short_name": "USDT"}
         r = requests.get(INSTRUMENT_URL, params=params, timeout=10)
-
         if r.status_code != 200:
             print(f"Instrument fetch error {pair}: HTTP {r.status_code}")
             return None
-
         data = r.json()
         tick = float(data["instrument"]["price_increment"])
-
         TICK_CACHE[pair] = tick
         return tick
-
     except Exception as e:
         print(f"Instrument fetch error {pair}: {e}")
         return None
 
 
-# ================= TICK-ALIGNMENT HELPERS =================
 def tick_decimals(tick):
     s = f"{tick:.12f}".rstrip("0").rstrip(".")
     if "." in s:
@@ -101,42 +79,29 @@ def tick_decimals(tick):
 def align_to_tick(price, tick):
     if tick is None or tick <= 0:
         return None
-
     steps = round(price / tick)
     decimals = tick_decimals(tick)
     snapped = steps * tick
-
     return f"{snapped:.{decimals}f}"
 
 
-# ================= GET CURRENT PRICE =================
 def get_current_price(pair):
-
     try:
         r = requests.get(PRICES_URL, timeout=10)
-
         if r.status_code != 200:
             return None
-
         data = r.json()
-
         pair_data = data.get("prices", {}).get(pair)
-
         if not pair_data:
             return None
-
         return float(pair_data.get("ls"))
-
     except Exception as e:
         print("Price fetch error:", e)
         return None
 
 
-# ================= UPDATE SL =================
 def update_sl(position_id, sl_price_str, existing_tp_str):
-
     timestamp = int(round(time.time() * 1000))
-
     body = {
         "timestamp": timestamp,
         "id": position_id,
@@ -145,38 +110,27 @@ def update_sl(position_id, sl_price_str, existing_tp_str):
             "order_type": "stop_market"
         }
     }
-
     if existing_tp_str is not None:
         body["take_profit"] = {
             "stop_price": existing_tp_str,
             "order_type": "take_profit_market"
         }
-
     json_body = json.dumps(body, separators=(',', ':'))
-
-    signature = hmac.new(
-        secret_bytes,
-        json_body.encode(),
-        hashlib.sha256
-    ).hexdigest()
-
+    signature = hmac.new(secret_bytes, json_body.encode(), hashlib.sha256).hexdigest()
     headers = {
         "Content-Type": "application/json",
         "X-AUTH-APIKEY": API_KEY,
         "X-AUTH-SIGNATURE": signature
     }
-
     url = BASE_URL + "/exchange/v1/derivatives/futures/positions/create_tpsl"
-
     r = requests.post(url, data=json_body, headers=headers)
-
     return r.json()
 
 
 # ================= TRAILING SL CALCULATION =================
 def calculate_trailing_sl(side, entry_price, profit_percent):
 
-    level = int(profit_percent / 5)
+    level = int(profit_percent / 3.5)
 
     if level < 1:
         return None
@@ -277,8 +231,6 @@ while True:
                 continue
 
             # ===== CAP EXISTING SL TO MAX 5% LOSS =====
-            # If the SL currently sits further than 5% from entry on the
-            # losing side, pull it in to exactly -5%.
             if existing_sl is not None:
 
                 if side == "long":
@@ -300,13 +252,12 @@ while True:
                     result = update_sl(position_id, capped_sl_str, existing_tp_str)
                     print("Cap result:", result)
 
-                    # Update local view so the trailing block compares against the new SL.
                     existing_sl = float(capped_sl_str)
 
             raw_sl = calculate_trailing_sl(side, entry_price, profit_percent)
 
             if raw_sl is None:
-                print("Profit below 5% trigger, no trailing SL update")
+                print("Profit below 3.5% trigger, no trailing SL update")
                 print("---------------------")
                 continue
 
