@@ -130,7 +130,7 @@ def update_sl(position_id, sl_price_str, existing_tp_str):
 # ================= TRAILING SL CALCULATION =================
 def calculate_trailing_sl(side, entry_price, profit_percent):
 
-    level = int(profit_percent / 3.5)
+    level = int(profit_percent / 2)
 
     if level < 1:
         return None
@@ -257,7 +257,7 @@ while True:
             raw_sl = calculate_trailing_sl(side, entry_price, profit_percent)
 
             if raw_sl is None:
-                print("Profit below 3.5% trigger, no trailing SL update")
+                print("Profit below 2% trigger, no trailing SL update")
                 print("---------------------")
                 continue
 
