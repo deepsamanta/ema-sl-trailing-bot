@@ -133,9 +133,12 @@ def calculate_trailing_sl(side, entry_price, profit_percent):
     level = int(profit_percent / 2)
 
     if level < 1:
-        return None
-
-    offset_percent = (level - 1) * 2
+        if profit_percent >= 1.4:
+            offset_percent = 0.3
+        else:
+            return None
+    else:
+        offset_percent = (level - 1) * 2
 
     if side == "long":
         new_sl = entry_price * (1 + offset_percent / 100)
