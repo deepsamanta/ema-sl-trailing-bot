@@ -27,6 +27,7 @@ INSTRUMENT_URL = BASE_URL + "/exchange/v1/derivatives/futures/data/instrument"
 secret_bytes = bytes(API_SECRET, encoding="utf-8")
 
 MAX_SL_LOSS_PERCENT = 5.0
+TOTAL_PROFIT_TARGET_PERCENT = 1.6
 
 TICK_CACHE = {}
 
@@ -127,6 +128,24 @@ def update_sl(position_id, sl_price_str, existing_tp_str):
     return r.json()
 
 
+def exit_position(position_id):
+    timestamp = int(round(time.time() * 1000))
+    body = {
+        "timestamp": timestamp,
+        "id": position_id
+    }
+    json_body = json.dumps(body, separators=(',', ':'))
+    signature = hmac.new(secret_bytes, json_body.encode(), hashlib.sha256).hexdigest()
+    headers = {
+        "Content-Type": "application/json",
+        "X-AUTH-APIKEY": API_KEY,
+        "X-AUTH-SIGNATURE": signature
+    }
+    url = BASE_URL + "/exchange/v1/derivatives/futures/positions/exit"
+    r = requests.post(url, data=json_body, headers=headers)
+    return r.json()
+
+
 # ================= TRAILING SL CALCULATION =================
 def calculate_trailing_sl(side, entry_price, profit_percent):
 
@@ -159,6 +178,9 @@ while True:
         print("API error:", positions)
         time.sleep(150)
         continue
+
+    total_profit_percent = 0.0
+    active_position_ids = []
 
     for pos in positions:
 
@@ -198,6 +220,9 @@ while True:
                 profit_percent = ((current_price - entry_price) / entry_price) * 100
             else:
                 profit_percent = ((entry_price - current_price) / entry_price) * 100
+
+            total_profit_percent += profit_percent
+            active_position_ids.append(position_id)
 
             tick = get_price_increment(pair)
 
@@ -295,6 +320,14 @@ while True:
 
         except Exception as e:
             print("Error processing position:", e)
+
+    print("Total profit percent:", round(total_profit_percent, 3), "%")
+
+    if active_position_ids and total_profit_percent >= TOTAL_PROFIT_TARGET_PERCENT:
+        print(f"Total profit {round(total_profit_percent, 3)}% >= {TOTAL_PROFIT_TARGET_PERCENT}% — closing all positions")
+        for position_id in active_position_ids:
+            result = exit_position(position_id)
+            print("Exit result:", position_id, result)
 
     print("Sleeping 2.5 minutes...\n")
 
